@@ -478,10 +478,17 @@ def convert_video(
         raw_stream.width = width
         raw_stream.height = height
         raw_stream.pix_fmt = "rgba"
-        raw_stream.time_base = input_stream.time_base or metadata["time_base"]
+        # NUT-мультиплексор с rawvideo стабилен только на time_base=1/30:
+        # на других шкалах (1/1000 у mp4, 1/90000 и т.п.) он жёстко падает
+        # при записи трейлера (close) — процесс умирает без исключения.
+        # PTS из воркера приходит в шкале входного потока — конвертируем в 1/30.
+        out_tb = Fraction(1, 30)
+        src_tb = input_stream.time_base or metadata["time_base"] or out_tb
+        raw_stream.time_base = out_tb
         guides = TemporalGuideGenerator(width, height)
         delivered = 0
         scene_resets = 0
+        last_pts = -1
         for index, frame in enumerate(input_container.decode(input_stream)):
             if controller.cancel.is_set():
                 raise Cancelled("Render stopped by user.")
@@ -507,8 +514,19 @@ def convert_video(
                 raise RuntimeError(f"Direct feature-18 evaluation failed on frame {index}: 0x{ngx_result:08X}")
             processed = np.frombuffer(_read_exact(worker.stdout, byte_count), dtype=np.uint8).reshape(height, width, 4)
             out_frame = av.VideoFrame.from_ndarray(processed, format="rgba")
+            # Воркер эхо-возвращает входной PTS (в шкале входного потока src_tb).
+            # Конвертируем в out_tb (1/30) и санитизируем: декодер может отдать
+            # None/отрицательный/NOPTS, а NUT падает с EINVAL на невалидных или
+            # обратных PTS — это и был «Invalid argument: '!?' returned 22»
+            # на кадрах после смены сцены. Гарантируем строгую монотонность.
+            if out_pts is None or out_pts < 0:
+                out_pts = last_pts + 1
+            out_pts = int(round(out_pts * src_tb / out_tb))
+            if out_pts <= last_pts:
+                out_pts = last_pts + 1
+            last_pts = out_pts
             out_frame.pts = out_pts
-            out_frame.time_base = input_stream.time_base or metadata["time_base"]
+            out_frame.time_base = out_tb
             for packet in raw_stream.encode(out_frame):
                 nut.mux(packet)
             delivered += 1
