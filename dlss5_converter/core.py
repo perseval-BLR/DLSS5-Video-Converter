@@ -289,6 +289,18 @@ def _encoder_probe(codec: str) -> bool:
 
 
 def _codec_command(options: ConversionOptions) -> tuple[list[str], str]:
+    if options.quality == "Lossless":
+        # NVENC lossless: -tune lossless (не -preset lossless — такого пресета нет).
+        # Только H.264/HEVC; AV1 lossless не поддерживается NVENC.
+        if options.codec == "H.264":
+            if _encoder_probe("h264_nvenc"):
+                return ["-c:v", "h264_nvenc", "-preset", "p6", "-tune", "lossless", "-pix_fmt", "yuv444p"], "h264_nvenc"
+            return ["-c:v", "libx264", "-preset", "slow", "-crf", "0", "-pix_fmt", "yuv444p"], "libx264"
+        if options.codec == "HEVC":
+            if _encoder_probe("hevc_nvenc"):
+                return ["-c:v", "hevc_nvenc", "-preset", "p6", "-tune", "lossless", "-pix_fmt", "yuv444p"], "hevc_nvenc"
+            return ["-c:v", "libx265", "-preset", "slow", "-crf", "0", "-pix_fmt", "yuv444p"], "libx265"
+        raise RuntimeError("AV1 NVENC does not support lossless. Choose H.264 or HEVC for lossless output.")
     cq = {"High": "17", "Balanced": "20", "Small": "24"}[options.quality]
     if options.codec == "H.264":
         if _encoder_probe("h264_nvenc"):
@@ -478,11 +490,12 @@ def convert_video(
         raw_stream.width = width
         raw_stream.height = height
         raw_stream.pix_fmt = "rgba"
-        # NUT-мультиплексор с rawvideo стабилен только на time_base=1/30:
-        # на других шкалах (1/1000 у mp4, 1/90000 и т.п.) он жёстко падает
-        # при записи трейлера (close) — процесс умирает без исключения.
-        # PTS из воркера приходит в шкале входного потока — конвертируем в 1/30.
-        out_tb = Fraction(1, 30)
+        # NUT-мультиплексор с rawvideo требует time_base, согласованный с rate:
+        # на рассинхроне (rate=60, tb=1/1000 и т.п.) он жёстко падает при записи
+        # трейлера (close) — процесс умирает без исключения. Берём tb = 1/rate,
+        # чтобы сохранить исходный fps (60 fps не превращался в 30).
+        # PTS из воркера приходит в шкале входного потока — конвертируем в out_tb.
+        out_tb = Fraction(1, rate)
         src_tb = input_stream.time_base or metadata["time_base"] or out_tb
         raw_stream.time_base = out_tb
         guides = TemporalGuideGenerator(width, height)

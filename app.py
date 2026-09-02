@@ -39,6 +39,25 @@ WORK = ROOT / "_work"
 WORK.mkdir(exist_ok=True)
 OUTPUTS.mkdir(exist_ok=True)
 
+# ── Heartbeat: авто-выход при закрытии вкладки/браузера ──
+# Страница шлёт /api/heartbeat каждые 5 c. Если вкладок не осталось (heartbeat
+# устарел) и рендер не идёт — сервер сам завершает процесс, чтобы exe не висел
+# в памяти после закрытия браузера (жалоба: «приходится убивать через диспетчер»).
+HEARTBEAT_LOCK = threading.Lock()
+LAST_HEARTBEAT = time.time()
+HEARTBEAT_TIMEOUT = 30  # секунд без heartbeat → выход (если рендер не идёт)
+
+
+def _touch_heartbeat():
+    global LAST_HEARTBEAT
+    with HEARTBEAT_LOCK:
+        LAST_HEARTBEAT = time.time()
+
+
+def _heartbeat_stale() -> bool:
+    with HEARTBEAT_LOCK:
+        return time.time() - LAST_HEARTBEAT > HEARTBEAT_TIMEOUT
+
 # ── Состояние рендера ──
 STATE_LOCK = threading.Lock()
 STATE = {
@@ -382,6 +401,7 @@ body[data-theme="light"] .compare-btn { color: #fff; }
     <button class="help-btn" onclick="toggleLang()" id="langBtn">EN</button>
     <button class="help-btn" onclick="toggleTheme()" id="themeBtn">☀</button>
     <button class="help-btn" onclick="toggleReadme()" id="readmeBtn">README</button>
+    <button class="help-btn" onclick="exitApp()" id="exitBtn" title="Exit">⏻</button>
   </div>
 </div>
 
@@ -432,6 +452,7 @@ body[data-theme="light"] .compare-btn { color: #fff; }
       <option value="High" selected>High (CRF 17)</option>
       <option value="Balanced">Balanced (CRF 20)</option>
       <option value="Small">Small (CRF 24)</option>
+      <option value="Lossless">Lossless (NVENC)</option>
     </select>
     <label><span data-i18n="codec">Кодек</span> <span id="c-val">H.264</span></label>
     <select id="codec">
@@ -669,6 +690,18 @@ $('stop').addEventListener('click', () => {
   $('status').textContent = t('statusStop');
 });
 
+// ── Выход из приложения (кнопка ⏻ в шапке) ──
+function exitApp() {
+  if (confirm(t('exitConfirm'))) {
+    fetch('/api/exit', { method: 'POST' });
+    setTimeout(() => { window.close(); }, 300);
+  }
+}
+
+// ── Heartbeat: сообщаем серверу, что вкладка жива ──
+// Если все вкладки закрыты, сервер сам завершит процесс (не висит в памяти).
+setInterval(() => { fetch('/api/heartbeat', { method: 'POST' }).catch(() => {}); }, 5000);
+
 // ── Результаты ──
 function loadResults() {
   fetch('/api/results').then(r => r.json()).then(d => {
@@ -709,6 +742,7 @@ const I18N = {
     compareDone: 'Сравнить ДО/ПОСЛЕ', compareBefore: 'ДО', compareAfter: 'ПОСЛЕ NR',
     compareNotFound: 'Оригинал не найден для этого рендера', comparePlay: 'Пуск', comparePause: 'Пауза',
     compareSync: 'Синхронизация недоступна — одно из видео не загрузилось',
+    exitConfirm: 'Закрыть приложение? Рендер будет остановлен.',
   },
   en: {
     addVideo: 'Add video', addHint: 'mp4 / mkv / webm · click to select',
@@ -725,6 +759,7 @@ const I18N = {
     compareDone: 'Compare BEFORE/AFTER', compareBefore: 'BEFORE', compareAfter: 'AFTER NR',
     compareNotFound: 'No original found for this render', comparePlay: 'Play', comparePause: 'Pause',
     compareSync: 'Sync unavailable — one of the videos did not load',
+    exitConfirm: 'Close the app? The render will be stopped.',
   },
 };
 let lang = 'ru';
@@ -1131,6 +1166,13 @@ class Handler(BaseHTTPRequestHandler):
         elif parsed.path == "/api/cancel":
             cancel_active_job()
             self._json(200, {"ok": True})
+        elif parsed.path == "/api/heartbeat":
+            _touch_heartbeat()
+            self._json(200, {"ok": True})
+        elif parsed.path == "/api/exit":
+            # Явный выход: завершаем процесс (кнопка «Выход» в шапке).
+            threading.Timer(0.2, _shutdown_server).start()
+            self._json(200, {"ok": True})
         elif parsed.path == "/api/clear":
             for f in OUTPUTS.iterdir():
                 try:
@@ -1142,7 +1184,29 @@ class Handler(BaseHTTPRequestHandler):
             self._json(404, {"ok": False, "error": "not found"})
 
 
+def _shutdown_server():
+    """Останавливает сервер и завершает процесс (вызывается из /api/exit или watcher)."""
+    try:
+        server.shutdown()
+    except Exception:
+        pass
+    os._exit(0)
+
+
+def _heartbeat_watcher():
+    """Фон: если вкладок нет (heartbeat устарел) и рендер не идёт — выходим."""
+    while True:
+        time.sleep(5)
+        try:
+            st = _get_state()
+            if not st["running"] and _heartbeat_stale():
+                _shutdown_server()
+        except Exception:
+            pass
+
+
 def main():
+    global server
     port = 7860
     try:
         print(f"* DLSS 5 Video Converter - http://127.0.0.1:{port}")
@@ -1151,6 +1215,7 @@ def main():
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     # Авто-открытие браузера (как в NR Media UI) — с задержкой, чтобы сервер успел подняться
     threading.Timer(0.8, lambda: webbrowser.open(f"http://127.0.0.1:{port}")).start()
+    threading.Thread(target=_heartbeat_watcher, daemon=True).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

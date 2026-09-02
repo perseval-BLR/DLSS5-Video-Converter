@@ -1,8 +1,15 @@
-## DLSS 5 Video Converter v0.1.1
+## DLSS 5 Video Converter v0.1.2
 
 Local web tool that runs video through **NVIDIA DLSS 5 Neural Rendering** (NGX feature 18, `nvngx_dlssnr.dll`) with optical-flow motion vectors and encodes the result with NVENC.
 
 **Run:** unzip → `DLSS5VideoConverter.exe` → browser opens at `http://127.0.0.1:7860` → add a video → Render.
+
+### v0.1.2 — fps fix, lossless, auto-exit
+
+- **Fixed 60 fps videos being slowed to 30 fps** (regression from v0.1.1): the intermediate stream now uses the input's frame rate as its time base, so the original fps is preserved.
+- **Lossless encoding** (Quality → "Lossless (NVENC)"): `-tune lossless` for H.264/HEVC NVENC (yuv444p), software fallback `-crf 0`. AV1 NVENC has no lossless mode — a clear error is shown instead.
+- **Auto-exit when the browser tab is closed**: the page sends a heartbeat; if no tabs are left (30 s of silence) and no render is running, the app shuts itself down — no more killing it via Task Manager.
+- **Exit button (⏻) in the header** with confirmation.
 
 ### v0.1.1 — crash fixes
 
