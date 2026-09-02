@@ -68,8 +68,11 @@ if exist "preview" (
         echo robocopy failed for preview. Aborting.
         exit /b 1
     )
-    rem nvngx_dlssnr.dll копируется при старте из bin\runtime — не дублируем
-    if exist "%DIST%\preview\nvngx_dlssnr.dll" del /q "%DIST%\preview\nvngx_dlssnr.dll"
+    rem Самодостаточный архив: nvngx_dlssnr.dll кладём прямо в preview\
+    rem (не полагаемся на копирование при старте)
+    if not exist "%DIST%\preview\nvngx_dlssnr.dll" (
+        copy /y "bin\runtime\nvngx_dlssnr.dll" "%DIST%\preview\nvngx_dlssnr.dll" >nul
+    )
 ) else (
     echo WARNING: preview\ not found - frame preview will be unavailable.
 )
