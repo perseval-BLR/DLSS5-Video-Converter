@@ -776,7 +776,10 @@ function runPreview() {
       if (d.ok) {
         $('preview-box').style.display = 'block';
         $('preview-out').src = d.image;
-        $('preview-hint').textContent = d.elapsed + 's';
+        // Фото-CLI принимает параметры только [0,2] — если ползунки выше,
+        // превью клампится; честно говорим об этом
+        const clamped = [+$('intensity').value, +$('tone').value, +$('structure').value].some(v => v > 2) || +$('skin').value > 2;
+        $('preview-hint').textContent = d.elapsed + 's' + (clamped ? ' (clamped to [0,2])' : '');
       } else {
         $('preview-hint').textContent = d.error || 'error';
       }
@@ -1289,11 +1292,18 @@ class Handler(BaseHTTPRequestHandler):
                 t_sec = float(body.get("time", 0))
                 profile = body.get("profile", "Strong / Cinematic")
                 native = dict(PROFILES.get(profile) or PROFILES["Strong / Cinematic"])
-                for key, opt in (("intensity", "intensity"), ("tone", "local_tone"),
-                                 ("structure", "local_structure"), ("skin", "skin_structure")):
+                # Фото-CLI (dlssnr-image.exe) принимает intensity/tone/structure
+                # только [0, 2], skin [-1, 2] — рендер же допускает до 3.
+                # Клампим для превью (иначе «Fatal: --intensity must be finite in [0, 2]»).
+                for key, opt, lo, hi in (("intensity", "intensity", 0.0, 2.0),
+                                         ("tone", "local_tone", 0.0, 2.0),
+                                         ("structure", "local_structure", 0.0, 2.0),
+                                         ("skin", "skin_structure", -1.0, 2.0)):
                     v = body.get(key)
                     if v is not None:
-                        native[opt] = float(v)
+                        native[opt] = min(max(float(v), lo), hi)
+                    else:
+                        native[opt] = min(max(float(native[opt]), lo), hi)
                 work = tempfile.mkdtemp(prefix="prev_", dir=WORK)
                 in_png = os.path.join(work, "frame.png")
                 out_png = os.path.join(work, "out.png")
