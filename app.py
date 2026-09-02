@@ -755,55 +755,54 @@ function showPreviewRow() {
 
 function runPreview() {
   if (previewBusy || !currentFile) return;
-  const t = $('preview').currentTime || 0;
-  const doPreview = (path) => {
-    previewPath = path;
-    previewBusy = true;
-    $('preview-btn').disabled = true;
-    $('preview-hint').textContent = '...';
-    fetch('/api/preview', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        path: path,
-        time: t,
-        profile: $('profile').value,
-        intensity: +$('intensity').value,
-        tone: +$('tone').value,
-        structure: +$('structure').value,
-        skin: +$('skin').value,
-      })
-    }).then(r => r.json()).then(d => {
-      previewBusy = false;
-      $('preview-btn').disabled = false;
-      if (d.ok) {
-        $('preview-box').style.display = 'block';
-        $('preview-out').src = d.image;
-        // Фото-CLI принимает параметры только [0,2] — если ползунки выше,
-        // превью клампится; честно говорим об этом
-        const clamped = [+$('intensity').value, +$('tone').value, +$('structure').value].some(v => v > 2) || +$('skin').value > 2;
-        $('preview-hint').textContent = d.elapsed + 's' + (clamped ? ' (clamped to [0,2])' : '');
-      } else {
-        $('preview-hint').textContent = d.error || 'error';
-      }
-    }).catch(() => {
-      previewBusy = false;
-      $('preview-btn').disabled = false;
-      $('preview-hint').textContent = 'network error';
-    });
-  };
-  if (previewPath) {
-    doPreview(previewPath);
-  } else {
-    // Первый клик: загружаем файл на сервер, чтобы ffmpeg мог выдернуть кадр
-    const fd = new FormData();
-    fd.append('file', currentFile);
-    $('preview-hint').textContent = 'upload...';
-    fetch('/api/upload', { method: 'POST', body: fd }).then(r => r.json()).then(up => {
-      if (up.ok) doPreview(up.path);
-      else $('preview-hint').textContent = up.error || 'upload failed';
-    }).catch(() => { $('preview-hint').textContent = 'upload failed'; });
+  const v = $('preview');
+  if (!v.videoWidth || !v.videoHeight) return;
+  // Снимок текущего кадра в canvas → JPEG base64 (~50-100 КБ).
+  // Без загрузки всего файла на сервер — превью мгновенное.
+  let dataUrl = null;
+  try {
+    const c = document.createElement('canvas');
+    c.width = v.videoWidth;
+    c.height = v.videoHeight;
+    c.getContext('2d').drawImage(v, 0, 0);
+    dataUrl = c.toDataURL('image/jpeg', 0.85);
+  } catch (e) {
+    $('preview-hint').textContent = 'canvas error';
+    return;
   }
+  previewBusy = true;
+  $('preview-btn').disabled = true;
+  $('preview-hint').textContent = '...';
+  fetch('/api/preview', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      image: dataUrl,
+      time: v.currentTime || 0,
+      profile: $('profile').value,
+      intensity: +$('intensity').value,
+      tone: +$('tone').value,
+      structure: +$('structure').value,
+      skin: +$('skin').value,
+    })
+  }).then(r => r.json()).then(d => {
+    previewBusy = false;
+    $('preview-btn').disabled = false;
+    if (d.ok) {
+      $('preview-box').style.display = 'block';
+      $('preview-out').src = d.image;
+      // Фото-CLI принимает параметры только [0,2] — если ползунки выше,
+      // превью клампится; честно говорим об этом
+      const clamped = [+$('intensity').value, +$('tone').value, +$('structure').value].some(v => v > 2) || +$('skin').value > 2;
+      $('preview-hint').textContent = d.elapsed + 's' + (clamped ? ' (clamped to [0,2])' : '');
+    } else {
+      $('preview-hint').textContent = d.error || 'error';
+    }
+  }).catch(() => {
+    previewBusy = false;
+    $('preview-btn').disabled = false;
+    $('preview-hint').textContent = 'network error';
+  });
 }
 
 $('preview-btn').addEventListener('click', runPreview);
@@ -1272,17 +1271,17 @@ class Handler(BaseHTTPRequestHandler):
                 fh.write(payload)
             self._json(200, {"ok": True, "path": str(dest), "size": len(payload)})
         elif parsed.path == "/api/preview":
-            # Превью кадра: выдернуть кадр из видео → прогнать через NR Media CLI
-            # с текущими ползунками → вернуть PNG. «Кое-как»: без temporal-контекста
-            # (optical flow), но для подбора параметров достаточно.
+            # Превью кадра: браузер шлёт canvas-снимок текущего кадра (JPEG base64,
+            # ~50-100 КБ) — БЕЗ загрузки всего файла на сервер. Раньше первый клик
+            # грузил весь файл (275 МБ Control висел минуты) — юзер бросал.
             try:
                 body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))).decode("utf-8"))
             except Exception:
                 self._json(400, {"ok": False, "error": "bad json"})
                 return
-            src = Path(body.get("path", ""))
-            if not src.is_file():
-                self._json(400, {"ok": False, "error": "file not found"})
+            img_b64 = body.get("image", "")
+            if not img_b64 or "," not in img_b64:
+                self._json(400, {"ok": False, "error": "no image"})
                 return
             if not PREVIEW_READY:
                 self._json(200, {"ok": False, "error": "preview not available (dlssnr-image.exe missing)"})
@@ -1310,17 +1309,16 @@ class Handler(BaseHTTPRequestHandler):
                 work = tempfile.mkdtemp(prefix="prev_", dir=WORK)
                 in_png = os.path.join(work, "frame.png")
                 out_png = os.path.join(work, "out.png")
-                # Кадр из видео (точный seek по времени)
-                r = subprocess.run(
-                    [str(FFMPEG), "-hide_banner", "-loglevel", "error", "-y",
-                     "-ss", f"{t_sec:.3f}", "-i", str(src), "-frames:v", "1",
-                     "-vf", "scale=1280:trunc(ow/a/2)*2", in_png],
-                    capture_output=True, text=True, errors="replace", timeout=60,
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                )
-                if r.returncode != 0 or not os.path.exists(in_png):
-                    self._json(200, {"ok": False, "error": "frame extract failed: " + (r.stderr or "")[-300:]})
-                    return
+                img_bytes = base64.b64decode(img_b64.split(",", 1)[1])
+                with open(in_png, "wb") as f:
+                    f.write(img_bytes)
+                # WIC-кодек CLI не переваривает некоторые JPEG с Exif (0x88982F8E) —
+                # пересохраняем через Pillow в чистый PNG
+                try:
+                    from PIL import Image as PILImage
+                    PILImage.open(in_png).convert("RGB").save(in_png, "PNG")
+                except Exception:
+                    pass
                 cmd = [
                     str(PREVIEW_CLI), in_png, out_png,
                     "--preset", str(native["preset"]),
