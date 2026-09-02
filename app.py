@@ -74,15 +74,20 @@ def _init_preview():
 # Страница шлёт /api/heartbeat каждые 5 c. Если вкладок не осталось (heartbeat
 # устарел) и рендер не идёт — сервер сам завершает процесс, чтобы exe не висел
 # в памяти после закрытия браузера (жалоба: «приходится убивать через диспетчер»).
+# ВАЖНО: Chrome/Edge троттлят setInterval в фоновых вкладках (до 1 раза в 60 c),
+# поэтому таймаут НЕ может быть меньше ~90 c — иначе сервер убивает себя, пока
+# вкладка просто свёрнута (симптом: «network error» при клике на превью).
 HEARTBEAT_LOCK = threading.Lock()
 LAST_HEARTBEAT = time.time()
-HEARTBEAT_TIMEOUT = 30  # секунд без heartbeat → выход (если рендер не идёт)
+HEARTBEAT_TIMEOUT = 120  # секунд без heartbeat → выход (если рендер не идёт)
+EXIT_PENDING = None  # время отложенного выхода (sendBeacon при закрытии вкладки)
 
 
 def _touch_heartbeat():
-    global LAST_HEARTBEAT
+    global LAST_HEARTBEAT, EXIT_PENDING
     with HEARTBEAT_LOCK:
         LAST_HEARTBEAT = time.time()
+        EXIT_PENDING = None  # страница жива (или перезагрузилась) — отменяем выход
 
 
 def _heartbeat_stale() -> bool:
@@ -833,6 +838,11 @@ function exitApp() {
 // ── Heartbeat: сообщаем серверу, что вкладка жива ──
 // Если все вкладки закрыты, сервер сам завершит процесс (не висит в памяти).
 setInterval(() => { fetch('/api/heartbeat', { method: 'POST' }).catch(() => {}); }, 5000);
+// При закрытии вкладки — быстрый сигнал на выход (sendBeacon переживает unload).
+// Сервер выходит через 5 c, если страница не перезагрузилась (heartbeat отменит).
+window.addEventListener('beforeunload', () => {
+  try { navigator.sendBeacon('/api/exit-pending', '{}'); } catch (e) {}
+});
 
 // ── Результаты ──
 function loadResults() {
@@ -1376,6 +1386,12 @@ class Handler(BaseHTTPRequestHandler):
         elif parsed.path == "/api/heartbeat":
             _touch_heartbeat()
             self._json(200, {"ok": True})
+        elif parsed.path == "/api/exit-pending":
+            # Страница закрывается (beforeunload → sendBeacon). Выходим через 5 c,
+            # если страница не перезагрузилась (heartbeat отменит выход).
+            global EXIT_PENDING
+            EXIT_PENDING = time.time() + 5
+            self._json(200, {"ok": True})
         elif parsed.path == "/api/exit":
             # Явный выход: завершаем процесс (кнопка «Выход» в шапке).
             threading.Timer(0.2, _shutdown_server).start()
@@ -1406,7 +1422,14 @@ def _heartbeat_watcher():
         time.sleep(5)
         try:
             st = _get_state()
-            if not st["running"] and _heartbeat_stale():
+            if st["running"]:
+                continue
+            with HEARTBEAT_LOCK:
+                pending = EXIT_PENDING
+                stale = time.time() - LAST_HEARTBEAT > HEARTBEAT_TIMEOUT
+            if pending is not None and time.time() >= pending:
+                _shutdown_server()
+            elif stale:
                 _shutdown_server()
         except Exception:
             pass
