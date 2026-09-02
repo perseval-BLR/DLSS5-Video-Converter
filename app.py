@@ -411,8 +411,8 @@ body[data-theme="light"] .compare-btn { color: #fff; }
 .compare-lbl b { color: var(--accent-2); }
 .compare-lbl:first-child b { color: var(--muted); border: 1px solid var(--border-strong); border-radius: 6px; padding: 1px 6px; }
 .compare-video { width: 100%; border-radius: var(--radius-sm); background: #000; border: 1px solid var(--border); }
-/* Превью кадра: картинки не должны выходить за рамки колонки */
-#preview-src, #preview-out {
+/* Превью кадра: одно изображение размером с окно видео */
+#preview-out {
   width: 100%; max-width: 100%; height: auto; display: block;
   border-radius: var(--radius-sm); background: #000; border: 1px solid var(--border);
   object-fit: contain;
@@ -464,11 +464,8 @@ body[data-theme="light"] .compare-btn { color: #fff; }
       <span class="hint" id="preview-hint"></span>
     </div>
     <div id="preview-box" style="display:none">
-      <div class="compare-lbl"><b data-i18n="previewBefore">ДО</b> <span data-i18n="previewAfter">ПОСЛЕ NR</span></div>
-      <div class="compare-grid">
-        <div class="compare-col"><img id="preview-src" alt="source frame"></div>
-        <div class="compare-col"><img id="preview-out" alt="NR result"></div>
-      </div>
+      <div class="compare-lbl"><span data-i18n="previewAfter">ПОСЛЕ NR</span></div>
+      <img id="preview-out" alt="NR result">
     </div>
     <div class="status" id="status" data-i18n="statusWait">Ожидание файла</div>
     <div class="progress" id="progress"><div class="bar" id="bar"></div></div>
@@ -756,19 +753,6 @@ function showPreviewRow() {
   $('preview-row').style.display = 'flex';
 }
 
-function grabSourceFrame() {
-  // Снимок текущего кадра видео в canvas → исходник для ДО/ПОСЛЕ
-  const v = $('preview');
-  if (!v.videoWidth || !v.videoHeight) return;
-  try {
-    const c = document.createElement('canvas');
-    c.width = v.videoWidth;
-    c.height = v.videoHeight;
-    c.getContext('2d').drawImage(v, 0, 0);
-    $('preview-src').src = c.toDataURL('image/jpeg', 0.85);
-  } catch (e) { /* ignore */ }
-}
-
 function runPreview() {
   if (previewBusy || !currentFile) return;
   const t = $('preview').currentTime || 0;
@@ -794,7 +778,6 @@ function runPreview() {
       $('preview-btn').disabled = false;
       if (d.ok) {
         $('preview-box').style.display = 'block';
-        grabSourceFrame();
         $('preview-out').src = d.image;
         // Фото-CLI принимает параметры только [0,2] — если ползунки выше,
         // превью клампится; честно говорим об этом
@@ -893,7 +876,7 @@ const I18N = {
     compareNotFound: 'Оригинал не найден для этого рендера', comparePlay: 'Пуск', comparePause: 'Пауза',
     compareSync: 'Синхронизация недоступна — одно из видео не загрузилось',
     exitConfirm: 'Закрыть приложение? Рендер будет остановлен.',
-    preview: 'Превью кадра', previewBefore: 'ДО', previewAfter: 'ПОСЛЕ NR',
+    preview: 'Превью кадра', previewAfter: 'ПОСЛЕ NR',
   },
   en: {
     addVideo: 'Add video', addHint: 'mp4 / mkv / webm · click to select',
@@ -911,7 +894,7 @@ const I18N = {
     compareNotFound: 'No original found for this render', comparePlay: 'Play', comparePause: 'Pause',
     compareSync: 'Sync unavailable — one of the videos did not load',
     exitConfirm: 'Close the app? The render will be stopped.',
-    preview: 'Frame preview', previewBefore: 'BEFORE', previewAfter: 'AFTER NR',
+    preview: 'Frame preview', previewAfter: 'AFTER NR',
   },
 };
 let lang = 'ru';
