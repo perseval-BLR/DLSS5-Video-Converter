@@ -750,6 +750,19 @@ function showPreviewRow() {
   $('preview-row').style.display = 'flex';
 }
 
+function grabSourceFrame() {
+  // Снимок текущего кадра видео в canvas → исходник для ДО/ПОСЛЕ
+  const v = $('preview');
+  if (!v.videoWidth || !v.videoHeight) return;
+  try {
+    const c = document.createElement('canvas');
+    c.width = v.videoWidth;
+    c.height = v.videoHeight;
+    c.getContext('2d').drawImage(v, 0, 0);
+    $('preview-src').src = c.toDataURL('image/jpeg', 0.85);
+  } catch (e) { /* ignore */ }
+}
+
 function runPreview() {
   if (previewBusy || !currentFile) return;
   const t = $('preview').currentTime || 0;
@@ -775,6 +788,7 @@ function runPreview() {
       $('preview-btn').disabled = false;
       if (d.ok) {
         $('preview-box').style.display = 'block';
+        grabSourceFrame();
         $('preview-out').src = d.image;
         // Фото-CLI принимает параметры только [0,2] — если ползунки выше,
         // превью клампится; честно говорим об этом
