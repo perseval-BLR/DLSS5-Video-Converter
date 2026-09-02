@@ -15,3 +15,4 @@ dist/
 
 # ── Runtime assets (bundled by build_exe.bat, not source) ──
 bin/
+preview/

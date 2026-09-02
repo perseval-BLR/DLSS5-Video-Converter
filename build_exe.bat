@@ -61,6 +61,19 @@ if %errorlevel% GEQ 8 (
     exit /b 1
 )
 
+echo Copying preview (dlssnr-image.exe, caller\nvngx.dll)...
+if exist "preview" (
+    robocopy "preview" "%DIST%\preview" /E /NFL /NDL /NJH /NJS /NP >nul
+    if %errorlevel% GEQ 8 (
+        echo robocopy failed for preview. Aborting.
+        exit /b 1
+    )
+    rem nvngx_dlssnr.dll копируется при старте из bin\runtime — не дублируем
+    if exist "%DIST%\preview\nvngx_dlssnr.dll" del /q "%DIST%\preview\nvngx_dlssnr.dll"
+) else (
+    echo WARNING: preview\ not found - frame preview will be unavailable.
+)
+
 echo Copying README files...
 copy /y "README.md" "%DIST%\" >nul
 copy /y "README.ru.md" "%DIST%\" >nul
