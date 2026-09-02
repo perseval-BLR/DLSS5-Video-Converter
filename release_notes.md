@@ -1,14 +1,21 @@
-## DLSS 5 Video Converter v0.1.3
+## DLSS 5 Video Converter v0.1.4
 
 Local web tool that runs video through **NVIDIA DLSS 5 Neural Rendering** (NGX feature 18, `nvngx_dlssnr.dll`) with optical-flow motion vectors and encodes the result with NVENC.
 
 **Run:** unzip → `DLSS5VideoConverter.exe` → browser opens at `http://127.0.0.1:7860` → add a video → Render.
 
+### v0.1.4 — preview fixes
+
+- **Fixed the server dying while the tab was minimized** (the "network error" after ~1 min): Chrome/Edge throttle `setInterval` in background tabs, so the 30 s heartbeat timeout killed the server. Timeout is now 120 s; closing the tab sends `/api/exit-pending` via `sendBeacon` (5 s delayed exit, cancelled by heartbeat on reload) — auto-exit still works, no false kills.
+- **Preview no longer uploads the whole video**: the browser sends a canvas snapshot of the current frame (JPEG base64, ~50-100 KB) — instant preview, no upload.
+- **Preview shows a single NR result sized like the video window** (no BEFORE/AFTER side-by-side).
+- **Preview params clamped to the photo-CLI range [0,2]** (skin [-1,2]) with a "(clamped to [0,2])" hint; the render itself still uses full values.
+- **Self-contained archive**: `nvngx_dlssnr.dll` is bundled in `preview/` inside the zip — unzip and run, nothing else to place.
+
 ### v0.1.3 — frame preview
 
-- **Frame preview** ("Превью кадра" button under the video): grabs the current frame (at the seek position) and runs it through the NR CLI with your current sliders — BEFORE/AFTER side by side. Slider changes re-render with 400 ms debounce.
+- **Frame preview** ("Превью кадра" button under the video): grabs the current frame (at the seek position) and runs it through the NR CLI with your current sliders. Slider changes re-render with 400 ms debounce.
 - **Honest caveat**: this is a *hacky* preview — the frame is processed as a still photo, without temporal context (optical flow), so the final render may differ. A true live preview inside the worker is a separate large feature (C++ patch), not done.
-- Requires `preview/dlssnr-image.exe` + `preview/caller/nvngx.dll` next to the app (from NR Media UI); `nvngx_dlssnr.dll` is copied from `bin/runtime` on startup. If missing, the button is hidden.
 
 ### v0.1.2 — fps fix, lossless, auto-exit
 
