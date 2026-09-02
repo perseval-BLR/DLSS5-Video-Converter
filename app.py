@@ -411,6 +411,12 @@ body[data-theme="light"] .compare-btn { color: #fff; }
 .compare-lbl b { color: var(--accent-2); }
 .compare-lbl:first-child b { color: var(--muted); border: 1px solid var(--border-strong); border-radius: 6px; padding: 1px 6px; }
 .compare-video { width: 100%; border-radius: var(--radius-sm); background: #000; border: 1px solid var(--border); }
+/* Превью кадра: картинки не должны выходить за рамки колонки */
+#preview-src, #preview-out {
+  width: 100%; max-width: 100%; height: auto; display: block;
+  border-radius: var(--radius-sm); background: #000; border: 1px solid var(--border);
+  object-fit: contain;
+}
 </style>
 </head>
 <body>
