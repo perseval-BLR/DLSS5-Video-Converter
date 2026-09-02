@@ -5,11 +5,13 @@ DLSS 5 Video Converter — веб-интерфейс (стиль NR Media UI).
 Бэкенд: dlss5_converter.core (feature 18, optical flow, NVENC).
 Запуск: start.bat  →  http://127.0.0.1:7860
 """
+import base64
 import json
 import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -28,8 +30,11 @@ sys.path.insert(0, str(ROOT))
 
 from dlss5_converter.core import (
     ConversionOptions,
+    FFMPEG,
     ORIGINALS,
     OUTPUTS,
+    PROFILES,
+    RUNTIME,
     cancel_active_job,
     convert_video,
     detect_gpu,
@@ -38,6 +43,32 @@ from dlss5_converter.core import (
 WORK = ROOT / "_work"
 WORK.mkdir(exist_ok=True)
 OUTPUTS.mkdir(exist_ok=True)
+
+# ── Превью кадра (NR Media CLI) ──
+# dlssnr-image.exe + caller/nvngx.dll лежат в preview/ (из NR Media UI),
+# nvngx_dlssnr.dll копируется туда при старте из bin/runtime (одна копия в зипе).
+PREVIEW_DIR = ROOT / "preview"
+PREVIEW_CLI = PREVIEW_DIR / "dlssnr-image.exe"
+PREVIEW_DLL = PREVIEW_DIR / "nvngx_dlssnr.dll"
+PREVIEW_READY = False
+
+
+def _init_preview():
+    global PREVIEW_READY
+    try:
+        if not PREVIEW_CLI.exists():
+            return
+        if not (PREVIEW_DIR / "caller" / "nvngx.dll").exists():
+            return
+        if not PREVIEW_DLL.exists():
+            src = RUNTIME / "nvngx_dlssnr.dll"
+            if not src.exists():
+                return
+            PREVIEW_DIR.mkdir(exist_ok=True)
+            shutil.copy2(src, PREVIEW_DLL)
+        PREVIEW_READY = True
+    except Exception:
+        PREVIEW_READY = False
 
 # ── Heartbeat: авто-выход при закрытии вкладки/браузера ──
 # Страница шлёт /api/heartbeat каждые 5 c. Если вкладок не осталось (heartbeat
@@ -422,6 +453,17 @@ body[data-theme="light"] .compare-btn { color: #fff; }
     </div>
     <div id="fileinfo"></div>
     <video class="preview" id="preview" controls></video>
+    <div class="row" id="preview-row" style="display:none">
+      <button class="btn2" id="preview-btn" data-i18n="preview">Превью кадра</button>
+      <span class="hint" id="preview-hint"></span>
+    </div>
+    <div id="preview-box" style="display:none">
+      <div class="compare-lbl"><b data-i18n="previewBefore">ДО</b> <span data-i18n="previewAfter">ПОСЛЕ NR</span></div>
+      <div class="compare-grid">
+        <div class="compare-col"><img id="preview-src" alt="source frame"></div>
+        <div class="compare-col"><img id="preview-out" alt="NR result"></div>
+      </div>
+    </div>
     <div class="status" id="status" data-i18n="statusWait">Ожидание файла</div>
     <div class="progress" id="progress"><div class="bar" id="bar"></div></div>
     <div class="error-box" id="error"></div>
@@ -565,10 +607,17 @@ function setFile(f) {
   currentFile = f;
   $('fileinfo').style.display = 'block';
   $('fileinfo').innerHTML = '<b>' + f.name + '</b> · ' + (f.size/1048576).toFixed(1) + ' MB';
-  $('preview').style.display = 'none';
+  // Видео показываем сразу — по нему перематываем и берём кадр для превью
+  $('preview').src = URL.createObjectURL(f);
+  $('preview').style.display = 'block';
   $('render').disabled = false;
   $('status').textContent = t('statusReady') + ': ' + f.name;
   $('error').style.display = 'none';
+  // Превью: показываем кнопку, путь файла узнаём при первом клике (upload)
+  previewPath = null;
+  $('preview-box').style.display = 'none';
+  $('preview-hint').textContent = '';
+  showPreviewRow();
 }
 
 // ── NR-параметры: слайдеры + профили ──
@@ -690,6 +739,84 @@ $('stop').addEventListener('click', () => {
   $('status').textContent = t('statusStop');
 });
 
+// ── Превью кадра (NR Media CLI, фото-пайплайн) ──
+// «Кое-как»: кадр выдёргивается из видео и прогоняется без temporal-контекста,
+// но для подбора ползунков достаточно. Debounce 400 мс.
+let previewTimer = null;
+let previewBusy = false;
+let previewPath = null;
+
+function showPreviewRow() {
+  $('preview-row').style.display = 'flex';
+}
+
+function runPreview() {
+  if (previewBusy || !currentFile) return;
+  const t = $('preview').currentTime || 0;
+  const doPreview = (path) => {
+    previewPath = path;
+    previewBusy = true;
+    $('preview-btn').disabled = true;
+    $('preview-hint').textContent = '...';
+    fetch('/api/preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        path: path,
+        time: t,
+        profile: $('profile').value,
+        intensity: +$('intensity').value,
+        tone: +$('tone').value,
+        structure: +$('structure').value,
+        skin: +$('skin').value,
+      })
+    }).then(r => r.json()).then(d => {
+      previewBusy = false;
+      $('preview-btn').disabled = false;
+      if (d.ok) {
+        $('preview-box').style.display = 'block';
+        $('preview-out').src = d.image;
+        $('preview-hint').textContent = d.elapsed + 's';
+      } else {
+        $('preview-hint').textContent = d.error || 'error';
+      }
+    }).catch(() => {
+      previewBusy = false;
+      $('preview-btn').disabled = false;
+      $('preview-hint').textContent = 'network error';
+    });
+  };
+  if (previewPath) {
+    doPreview(previewPath);
+  } else {
+    // Первый клик: загружаем файл на сервер, чтобы ffmpeg мог выдернуть кадр
+    const fd = new FormData();
+    fd.append('file', currentFile);
+    $('preview-hint').textContent = 'upload...';
+    fetch('/api/upload', { method: 'POST', body: fd }).then(r => r.json()).then(up => {
+      if (up.ok) doPreview(up.path);
+      else $('preview-hint').textContent = up.error || 'upload failed';
+    }).catch(() => { $('preview-hint').textContent = 'upload failed'; });
+  }
+}
+
+$('preview-btn').addEventListener('click', runPreview);
+// Ползунки → пере-превью с debounce
+for (const id of ['intensity', 'tone', 'structure', 'skin', 'profile']) {
+  $(id).addEventListener('input', () => {
+    if (!previewPath) return;
+    clearTimeout(previewTimer);
+    previewTimer = setTimeout(runPreview, 400);
+  });
+}
+// Перемотка видео → пере-превью (только если превью уже открыто)
+$('preview').addEventListener('seeked', () => {
+  if (previewPath && $('preview-box').style.display === 'block') {
+    clearTimeout(previewTimer);
+    previewTimer = setTimeout(runPreview, 400);
+  }
+});
+
 // ── Выход из приложения (кнопка ⏻ в шапке) ──
 function exitApp() {
   if (confirm(t('exitConfirm'))) {
@@ -743,6 +870,7 @@ const I18N = {
     compareNotFound: 'Оригинал не найден для этого рендера', comparePlay: 'Пуск', comparePause: 'Пауза',
     compareSync: 'Синхронизация недоступна — одно из видео не загрузилось',
     exitConfirm: 'Закрыть приложение? Рендер будет остановлен.',
+    preview: 'Превью кадра', previewBefore: 'ДО', previewAfter: 'ПОСЛЕ NR',
   },
   en: {
     addVideo: 'Add video', addHint: 'mp4 / mkv / webm · click to select',
@@ -760,6 +888,7 @@ const I18N = {
     compareNotFound: 'No original found for this render', comparePlay: 'Play', comparePause: 'Pause',
     compareSync: 'Sync unavailable — one of the videos did not load',
     exitConfirm: 'Close the app? The render will be stopped.',
+    preview: 'Frame preview', previewBefore: 'BEFORE', previewAfter: 'AFTER NR',
   },
 };
 let lang = 'ru';
@@ -1136,6 +1265,73 @@ class Handler(BaseHTTPRequestHandler):
             with open(dest, "wb") as fh:
                 fh.write(payload)
             self._json(200, {"ok": True, "path": str(dest), "size": len(payload)})
+        elif parsed.path == "/api/preview":
+            # Превью кадра: выдернуть кадр из видео → прогнать через NR Media CLI
+            # с текущими ползунками → вернуть PNG. «Кое-как»: без temporal-контекста
+            # (optical flow), но для подбора параметров достаточно.
+            try:
+                body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))).decode("utf-8"))
+            except Exception:
+                self._json(400, {"ok": False, "error": "bad json"})
+                return
+            src = Path(body.get("path", ""))
+            if not src.is_file():
+                self._json(400, {"ok": False, "error": "file not found"})
+                return
+            if not PREVIEW_READY:
+                self._json(200, {"ok": False, "error": "preview not available (dlssnr-image.exe missing)"})
+                return
+            st = _get_state()
+            if st["running"]:
+                self._json(200, {"ok": False, "error": "render is running — preview disabled"})
+                return
+            try:
+                t_sec = float(body.get("time", 0))
+                profile = body.get("profile", "Strong / Cinematic")
+                native = dict(PROFILES.get(profile) or PROFILES["Strong / Cinematic"])
+                for key, opt in (("intensity", "intensity"), ("tone", "local_tone"),
+                                 ("structure", "local_structure"), ("skin", "skin_structure")):
+                    v = body.get(key)
+                    if v is not None:
+                        native[opt] = float(v)
+                work = tempfile.mkdtemp(prefix="prev_", dir=WORK)
+                in_png = os.path.join(work, "frame.png")
+                out_png = os.path.join(work, "out.png")
+                # Кадр из видео (точный seek по времени)
+                r = subprocess.run(
+                    [str(FFMPEG), "-hide_banner", "-loglevel", "error", "-y",
+                     "-ss", f"{t_sec:.3f}", "-i", str(src), "-frames:v", "1",
+                     "-vf", "scale=1280:trunc(ow/a/2)*2", in_png],
+                    capture_output=True, text=True, errors="replace", timeout=60,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                if r.returncode != 0 or not os.path.exists(in_png):
+                    self._json(200, {"ok": False, "error": "frame extract failed: " + (r.stderr or "")[-300:]})
+                    return
+                cmd = [
+                    str(PREVIEW_CLI), in_png, out_png,
+                    "--preset", str(native["preset"]),
+                    "--style", str(native["style"]),
+                    "--intensity", str(native["intensity"]),
+                    "--tone", str(native["local_tone"]),
+                    "--structure", str(native["local_structure"]),
+                    "--skin", str(native["skin_structure"]),
+                    "--auto-mask", str(native["auto_mask"]),
+                    "--diagnostics", "0",
+                ]
+                t0 = time.time()
+                proc = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=180,
+                                      cwd=str(PREVIEW_DIR),
+                                      creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                dt = round(time.time() - t0, 2)
+                if proc.returncode != 0 or not os.path.exists(out_png):
+                    self._json(200, {"ok": False, "error": "NR failed: " + (proc.stderr or proc.stdout or "")[-300:]})
+                    return
+                with open(out_png, "rb") as f:
+                    b64 = base64.b64encode(f.read()).decode("ascii")
+                self._json(200, {"ok": True, "image": "data:image/png;base64," + b64, "elapsed": dt})
+            except Exception as exc:
+                self._json(200, {"ok": False, "error": str(exc)})
         elif parsed.path == "/api/render":
             try:
                 body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))).decode("utf-8"))
@@ -1208,6 +1404,7 @@ def _heartbeat_watcher():
 def main():
     global server
     port = 7860
+    _init_preview()
     try:
         print(f"* DLSS 5 Video Converter - http://127.0.0.1:{port}")
     except Exception:

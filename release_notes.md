@@ -1,8 +1,14 @@
-## DLSS 5 Video Converter v0.1.2
+## DLSS 5 Video Converter v0.1.3
 
 Local web tool that runs video through **NVIDIA DLSS 5 Neural Rendering** (NGX feature 18, `nvngx_dlssnr.dll`) with optical-flow motion vectors and encodes the result with NVENC.
 
 **Run:** unzip → `DLSS5VideoConverter.exe` → browser opens at `http://127.0.0.1:7860` → add a video → Render.
+
+### v0.1.3 — frame preview
+
+- **Frame preview** ("Превью кадра" button under the video): grabs the current frame (at the seek position) and runs it through the NR CLI with your current sliders — BEFORE/AFTER side by side. Slider changes re-render with 400 ms debounce.
+- **Honest caveat**: this is a *hacky* preview — the frame is processed as a still photo, without temporal context (optical flow), so the final render may differ. A true live preview inside the worker is a separate large feature (C++ patch), not done.
+- Requires `preview/dlssnr-image.exe` + `preview/caller/nvngx.dll` next to the app (from NR Media UI); `nvngx_dlssnr.dll` is copied from `bin/runtime` on startup. If missing, the button is hidden.
 
 ### v0.1.2 — fps fix, lossless, auto-exit
 
